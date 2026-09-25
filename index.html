@@ -101,6 +101,24 @@ canvas{display:block;width:100%;height:auto;aspect-ratio:480/288;image-rendering
 .codex-item .s{color:var(--amber);white-space:nowrap}
 .progress{font-family:'Pixelify Sans',monospace;color:var(--muted);font-size:14px;margin-bottom:6px}
 kbd{font-family:'Pixelify Sans',monospace;border:2px solid var(--line);padding:0 6px;font-size:14px;background:var(--chip)}
+.timer{font-family:'Pixelify Sans',monospace;color:var(--muted);font-variant-numeric:tabular-nums}
+.field{display:flex;flex-direction:column;gap:4px;margin:0 0 12px;max-width:360px}
+.field label{font-size:14px;color:var(--muted)}
+.field input{font:inherit;font-size:16px;padding:9px 10px;border:2px solid var(--line);background:var(--panel);color:var(--ink);border-radius:0;width:100%}
+.field input:focus-visible{outline:3px solid var(--teal);outline-offset:1px}
+.field .err{color:var(--bad);font-size:13px;min-height:16px}
+.cert{border:2px solid var(--amber-fill);background:var(--chip);padding:14px 16px;margin-top:6px}
+.cert dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
+.cert dt{color:var(--muted);font-size:14px}
+.cert dd{margin:0;font-weight:700}
+.code-box{font-family:'Pixelify Sans',monospace;font-size:22px;letter-spacing:2px;background:var(--frame);color:var(--amber-fill);padding:10px 14px;text-align:center;margin:12px 0;word-break:break-all}
+.timenote{font-size:14px;color:var(--muted);margin-top:8px}
+.verify-result{margin-top:14px;padding:10px 12px;border:2px solid var(--line);display:none}
+.verify-result.show{display:block}
+.verify-result.good{border-color:var(--good)}
+.verify-result.bad{border-color:var(--bad)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+@media (max-width:480px){.grid2{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -114,6 +132,8 @@ kbd{font-family:'Pixelify Sans',monospace;border:2px solid var(--line);padding:0
       <div class="pips" id="pips" aria-label="Shields collected"></div>
       <div class="tools">
         <span id="starCount">0 stars</span>
+        <span id="timer" class="timer" hidden>0:00</span>
+        <button class="btn" id="certBtn" hidden>Certificate</button>
         <button class="btn" id="codexBtn">Codex</button>
         <button class="btn" id="resetBtn">Reset</button>
       </div>
@@ -289,9 +309,44 @@ const BOSS = [
 
 /* ---------------- State ---------------- */
 const SAVE_KEY = "models-keep-v1";
-let state = { solved:Array(10).fill(false), stars:Array(10).fill(0), boss:0, seenIntro:false };
+let state = { solved:Array(10).fill(false), stars:Array(10).fill(0), boss:0, seenIntro:false, playerName:"", startTime:null, certificate:null };
 try { const s = JSON.parse(localStorage.getItem(SAVE_KEY) || "null"); if (s && Array.isArray(s.solved)) state = Object.assign(state, s); } catch(e) {}
 function save(){ try { localStorage.setItem(SAVE_KEY, JSON.stringify(state)); } catch(e) {} }
+
+/* ---------------- Certificate codes ----------------
+   The code is self-contained: it carries the name, score, date and minutes
+   inside it, plus a short signature. Decoding needs no secret (anyone can
+   read the fields back out), but recomputing a signature that matches does —
+   so a code can be decoded by anybody, but only reproduced or edited by
+   someone who has this formula. Not cryptographic security (there's no
+   server, and the formula ships in this file), just enough to discourage
+   casually editing a score before sending it in. */
+const CODE_SECRET = "MODELS-KEEP-2026-AWARENESS";
+const SEP = "\u001F";
+function h32(str, seed){
+  let h = seed >>> 0;
+  for (let i=0;i<str.length;i++){ h = (Math.imul(h ^ str.charCodeAt(i), 2654435761)) >>> 0; h = (h ^ (h >>> 15)) >>> 0; }
+  return h >>> 0;
+}
+function normName(n){ return String(n||"").trim().toLowerCase().replace(/\s+/g," "); }
+function signFields(name, score, dateStr, minutes){
+  const base = CODE_SECRET+"|"+normName(name)+"|"+score+"|"+dateStr+"|"+minutes;
+  const a = h32(base, 0x9e3779b9).toString(36).toUpperCase().padStart(6,"0").slice(-6);
+  const b = h32(base.split("").reverse().join(""), 0x85ebca6b).toString(36).toUpperCase().padStart(6,"0").slice(-6);
+  return a+b;
+}
+function b64urlEncode(str){
+  const bytes = new TextEncoder().encode(str);
+  let binary = ""; bytes.forEach(b=>binary+=String.fromCharCode(b));
+  return btoa(binary).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
+function buildCode(name, score, dateStr, minutes){
+  const sig = signFields(name, score, dateStr, minutes);
+  const payload = name.trim()+SEP+score+SEP+dateStr+SEP+minutes+SEP+sig;
+  return "MK-"+b64urlEncode(payload);
+}
+function todayStr(d){ d=d||new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function fmtMinutes(ms){ const m=Math.floor(ms/60000), s=Math.floor((ms%60000)/1000); return m+":"+String(s).padStart(2,"0"); }
 
 /* ---------------- Map ---------------- */
 const T = 24, COLS = 31, ROWS = 16, VW = 480, VH = 288;
@@ -579,8 +634,44 @@ function showIntro(){
     <p>Each room holds a glowing terminal. Open it to learn one risk, then pass its challenge to earn a shield and unlock the next door. Collect all ten shields to face the final audit.</p>
     <h3>Controls</h3>
     <ul><li>Move with <kbd>arrows</kbd> or <kbd>WASD</kbd>, or the on-screen pad on touch screens.</li><li>Open a terminal with <kbd>E</kbd>, <kbd>Space</kbd> or the Open button.</li><li>Solve on the first try for three stars. Mistakes never lock you out.</li></ul>
-    <div class="row"><button class="btn primary" data-focus id="go">Start exploring</button></div>`);
-  document.getElementById("go").onclick=()=>{ state.seenIntro=true; save(); closeModal(); };
+    <div class="row"><button class="btn primary" data-focus id="go">Continue</button></div>`);
+  document.getElementById("go").onclick=showNameScreen;
+}
+
+function showNameScreen(){
+  openModal(`
+    <h2>Before you begin</h2>
+    <p>Passing the final audit generates a completion certificate with your name and a code on it, so you can prove you finished. Enter the name you'd like it to show, then start — that's also when the clock starts.</p>
+    <div class="field">
+      <label for="nameInput">Your name</label>
+      <input id="nameInput" type="text" maxlength="60" autocomplete="name" value="${esc(state.playerName)}">
+      <div class="err" id="nameErr"></div>
+    </div>
+    <div class="row"><button class="btn primary" data-focus id="start">Start exploring</button></div>`);
+  const input=document.getElementById("nameInput"), err=document.getElementById("nameErr");
+  input.focus({preventScroll:true});
+  document.getElementById("start").onclick=()=>{
+    const v=input.value.trim();
+    if (!v){ err.textContent="Enter your name so your certificate can carry it."; input.focus(); return; }
+    state.playerName=v;
+    if (!state.startTime) state.startTime=Date.now();
+    state.seenIntro=true; save(); closeModal(); startTimerUI();
+  };
+}
+
+let timerHandle=null;
+function startTimerUI(){
+  const el=document.getElementById("timer");
+  if (!state.startTime){ state.startTime=Date.now(); save(); }
+  if (!state.playerName) state.playerName="Player";
+  el.hidden=false;
+  const tick=()=>{ el.textContent=fmtMinutes(Date.now()-state.startTime); };
+  tick(); clearInterval(timerHandle); timerHandle=setInterval(tick,1000);
+}
+function updateCertBtn(){
+  const b=document.getElementById("certBtn");
+  if (state.certificate){ b.hidden=false; b.onclick=()=>showCertificate(state.certificate); }
+  else b.hidden=true;
 }
 
 function showLearn(i, fromCodex){
@@ -739,17 +830,50 @@ function runBoss(qs,idx,score){
   });
 }
 function bossEnd(score,total){
-  state.boss=Math.max(state.boss,score); save();
+  state.boss=Math.max(state.boss,score);
   const passed=score>=7;
   const stars=state.stars.reduce((a,b)=>a+b,0);
+  if (passed){
+    const minutes=Math.max(0,Math.floor((Date.now()-(state.startTime||Date.now()))/60000));
+    const date=todayStr();
+    const name=state.playerName||"Player";
+    state.certificate={ name, score, total, date, minutes, code:buildCode(name,score,date,minutes) };
+  }
+  save(); updateCertBtn();
   openModal(`
     <h2>${passed?"The keep is secure":"The audit found gaps"}</h2>
     <p style="font-size:22px" class="pix">${score} / ${total} incidents identified</p>
     <p>${passed?`You've learned all ten risks in the OWASP Top 10 for LLM Applications and earned ${stars} of 30 stars. Replay any room from the Codex to chase a perfect run.`:"Review the lessons in the Codex, then take the audit again. You need 7 to secure the keep."}</p>
-    <div class="row"><button class="btn" id="codex">Open Codex</button><button class="btn primary" data-focus id="again">${passed?"Back to the keep":"Retry the audit"}</button></div>`);
+    <div class="row"><button class="btn" id="codex">Open Codex</button><button class="btn primary" data-focus id="again">${passed?"See my certificate":"Retry the audit"}</button></div>`);
   document.getElementById("codex").onclick=showCodex;
-  document.getElementById("again").onclick= passed ? closeModal : ()=>runBoss(shuffle(BOSS).slice(0,8),0,0);
+  document.getElementById("again").onclick= passed ? ()=>showCertificate(state.certificate) : ()=>runBoss(shuffle(BOSS).slice(0,8),0,0);
 }
+
+function showCertificate(cert){
+  const under=cert.minutes<5;
+  openModal(`
+    <h2>Certificate of completion</h2>
+    <p>Keep a copy of this, or send it to whoever is tracking completions. The code alone carries your name, score, date and time — they only need to paste the code into the Verify tool, nothing else.</p>
+    <div class="cert">
+      <dl>
+        <dt>Name</dt><dd>${esc(cert.name)}</dd>
+        <dt>Score</dt><dd>${cert.score} / ${cert.total}</dd>
+        <dt>Date</dt><dd>${esc(cert.date)}</dd>
+        <dt>Time spent</dt><dd>${fmtMinutes(cert.minutes*60000)} (${cert.minutes} min)</dd>
+      </dl>
+      <div class="code-box">${esc(cert.code)}</div>
+    </div>
+    ${under?`<p class="timenote">This run took under 5 minutes. The code is still genuine — whoever reviews it can see the time and use their own judgment.</p>`:`<p class="timenote">Time spent is recorded from when the name screen was completed to when the audit was passed.</p>`}
+    <div class="row"><button class="btn" id="copy">Copy certificate text</button><button class="btn primary" data-focus id="close">Close</button></div>`);
+  document.getElementById("close").onclick=closeModal;
+  document.getElementById("copy").onclick=async ()=>{
+    const txt=`The Model's Keep — Certificate of completion\nName: ${cert.name}\nScore: ${cert.score} / ${cert.total}\nDate: ${cert.date}\nTime spent: ${cert.minutes} min\nCode: ${cert.code}`;
+    try{ await navigator.clipboard.writeText(txt); toast("Certificate copied."); }
+    catch(e){ toast("Couldn't copy automatically — select and copy the code manually."); }
+  };
+}
+
+
 
 /* ---------------- Buttons ---------------- */
 document.getElementById("codexBtn").onclick=showCodex;
@@ -757,12 +881,16 @@ let resetArmed=false, resetTimer;
 document.getElementById("resetBtn").onclick=function(){
   if(!resetArmed){ resetArmed=true; this.textContent="Tap again to reset"; resetTimer=setTimeout(()=>{resetArmed=false;this.textContent="Reset";},2500); return; }
   clearTimeout(resetTimer); resetArmed=false; this.textContent="Reset";
-  state={ solved:Array(10).fill(false), stars:Array(10).fill(0), boss:0, seenIntro:true };
-  save(); player.x=3*T+12; player.y=3*T+14; renderHud(); lastNear=undefined; toast("Progress reset. Back to room 1.");
+  clearInterval(timerHandle);
+  state={ solved:Array(10).fill(false), stars:Array(10).fill(0), boss:0, seenIntro:false, playerName:"", startTime:null, certificate:null };
+  save(); player.x=3*T+12; player.y=3*T+14; renderHud(); updateCertBtn();
+  document.getElementById("timer").hidden=true;
+  lastNear=undefined; toast("Progress reset. Back to room 1.");
+  showIntro();
 };
 
-renderHud();
-if(!state.seenIntro) showIntro();
+renderHud(); updateCertBtn();
+if(!state.seenIntro) showIntro(); else startTimerUI();
 requestAnimationFrame(loop);
 })();
 </script>
