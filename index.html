@@ -314,11 +314,11 @@ try { const s = JSON.parse(localStorage.getItem(SAVE_KEY) || "null"); if (s && A
 function save(){ try { localStorage.setItem(SAVE_KEY, JSON.stringify(state)); } catch(e) {} }
 
 /* ---------------- Certificate codes ----------------
-   The code is self-contained: it carries the name, score, date and minutes
-   inside it, plus a short signature. Decoding needs no secret (anyone can
-   read the fields back out), but recomputing a signature that matches does —
-   so a code can be decoded by anybody, but only reproduced or edited by
-   someone who has this formula. Not cryptographic security (there's no
+   The code is self-contained: it carries the name, score, date and elapsed
+   seconds inside it, plus a short signature. Decoding needs no secret (anyone
+   can read the fields back out), but recomputing a signature that matches
+   does — so a code can be decoded by anybody, but only reproduced or edited
+   by someone who has this formula. Not cryptographic security (there's no
    server, and the formula ships in this file), just enough to discourage
    casually editing a score before sending it in. */
 const CODE_SECRET = "MODELS-KEEP-2026-AWARENESS";
@@ -329,8 +329,8 @@ function h32(str, seed){
   return h >>> 0;
 }
 function normName(n){ return String(n||"").trim().toLowerCase().replace(/\s+/g," "); }
-function signFields(name, score, dateStr, minutes){
-  const base = CODE_SECRET+"|"+normName(name)+"|"+score+"|"+dateStr+"|"+minutes;
+function signFields(name, score, dateStr, seconds){
+  const base = CODE_SECRET+"|"+normName(name)+"|"+score+"|"+dateStr+"|"+seconds;
   const a = h32(base, 0x9e3779b9).toString(36).toUpperCase().padStart(6,"0").slice(-6);
   const b = h32(base.split("").reverse().join(""), 0x85ebca6b).toString(36).toUpperCase().padStart(6,"0").slice(-6);
   return a+b;
@@ -340,13 +340,13 @@ function b64urlEncode(str){
   let binary = ""; bytes.forEach(b=>binary+=String.fromCharCode(b));
   return btoa(binary).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 }
-function buildCode(name, score, dateStr, minutes){
-  const sig = signFields(name, score, dateStr, minutes);
-  const payload = name.trim()+SEP+score+SEP+dateStr+SEP+minutes+SEP+sig;
+function buildCode(name, score, dateStr, seconds){
+  const sig = signFields(name, score, dateStr, seconds);
+  const payload = name.trim()+SEP+score+SEP+dateStr+SEP+seconds+SEP+sig;
   return "MK-"+b64urlEncode(payload);
 }
 function todayStr(d){ d=d||new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
-function fmtMinutes(ms){ const m=Math.floor(ms/60000), s=Math.floor((ms%60000)/1000); return m+":"+String(s).padStart(2,"0"); }
+function fmtClock(ms){ const totalSec=Math.floor(ms/1000), m=Math.floor(totalSec/60), s=totalSec%60; return m+":"+String(s).padStart(2,"0"); }
 
 /* ---------------- Map ---------------- */
 const T = 24, COLS = 31, ROWS = 16, VW = 480, VH = 288;
@@ -375,8 +375,28 @@ const keys = { up:false, down:false, left:false, right:false };
 const keyMap = { ArrowUp:"up", KeyW:"up", ArrowDown:"down", KeyS:"down", ArrowLeft:"left", KeyA:"left", ArrowRight:"right", KeyD:"right" };
 let modalOpen = false;
 
+/* Dev shortcut for testing: while playing (not in a modal), press "9" five
+   times quickly to unlock every room and jump straight to being able to
+   reach the final audit, skipping all ten challenges. Not linked or hinted
+   at anywhere in the UI. Safe to leave in — it only marks rooms solved,
+   same as playing them normally, and Reset clears it. */
+let cheatBuf="", cheatTimer=null;
+function unlockAllForTesting(){
+  state.solved = Array(10).fill(true);
+  state.stars = state.stars.map(s=>Math.max(s,3));
+  if (!state.playerName) state.playerName="Test Player";
+  state.startTime = Date.now() - 6*60000;
+  state.seenIntro = true;
+  save(); renderHud(); updateCertBtn(); startTimerUI();
+  toast("Test mode: all shields granted. Head to the great hall.");
+}
+
 document.addEventListener("keydown", e=>{
   if (modalOpen){ if (e.key==="Escape") closeModal(); return; }
+  if (e.code==="Digit9" || e.code==="Numpad9"){
+    cheatBuf+="9"; clearTimeout(cheatTimer); cheatTimer=setTimeout(()=>{cheatBuf="";},1500);
+    if (cheatBuf==="99999"){ cheatBuf=""; unlockAllForTesting(); }
+  } else cheatBuf="";
   const k = keyMap[e.code];
   if (k){ keys[k]=true; e.preventDefault(); }
   if (e.code==="KeyE" || e.code==="Space" || e.code==="Enter"){ e.preventDefault(); interact(); }
@@ -665,7 +685,7 @@ function startTimerUI(){
   if (!state.startTime){ state.startTime=Date.now(); save(); }
   if (!state.playerName) state.playerName="Player";
   el.hidden=false;
-  const tick=()=>{ el.textContent=fmtMinutes(Date.now()-state.startTime); };
+  const tick=()=>{ el.textContent=fmtClock(Date.now()-state.startTime); };
   tick(); clearInterval(timerHandle); timerHandle=setInterval(tick,1000);
 }
 function updateCertBtn(){
@@ -834,10 +854,10 @@ function bossEnd(score,total){
   const passed=score>=7;
   const stars=state.stars.reduce((a,b)=>a+b,0);
   if (passed){
-    const minutes=Math.max(0,Math.floor((Date.now()-(state.startTime||Date.now()))/60000));
+    const seconds=Math.max(0,Math.floor((Date.now()-(state.startTime||Date.now()))/1000));
     const date=todayStr();
     const name=state.playerName||"Player";
-    state.certificate={ name, score, total, date, minutes, code:buildCode(name,score,date,minutes) };
+    state.certificate={ name, score, total, date, seconds, code:buildCode(name,score,date,seconds) };
   }
   save(); updateCertBtn();
   openModal(`
@@ -850,25 +870,14 @@ function bossEnd(score,total){
 }
 
 function showCertificate(cert){
-  const under=cert.minutes<5;
   openModal(`
-    <h2>Certificate of completion</h2>
-    <p>Keep a copy of this, or send it to whoever is tracking completions. The code alone carries your name, score, date and time — they only need to paste the code into the Verify tool, nothing else.</p>
-    <div class="cert">
-      <dl>
-        <dt>Name</dt><dd>${esc(cert.name)}</dd>
-        <dt>Score</dt><dd>${cert.score} / ${cert.total}</dd>
-        <dt>Date</dt><dd>${esc(cert.date)}</dd>
-        <dt>Time spent</dt><dd>${fmtMinutes(cert.minutes*60000)} (${cert.minutes} min)</dd>
-      </dl>
-      <div class="code-box">${esc(cert.code)}</div>
-    </div>
-    ${under?`<p class="timenote">This run took under 5 minutes. The code is still genuine — whoever reviews it can see the time and use their own judgment.</p>`:`<p class="timenote">Time spent is recorded from when the name screen was completed to when the audit was passed.</p>`}
-    <div class="row"><button class="btn" id="copy">Copy certificate text</button><button class="btn primary" data-focus id="close">Close</button></div>`);
+    <h2>Certificate code</h2>
+    <p>Send this code to whoever is tracking completions for The Model's Keep — that's all they need.</p>
+    <div class="code-box">${esc(cert.code)}</div>
+    <div class="row"><button class="btn" id="copy">Copy code</button><button class="btn primary" data-focus id="close">Close</button></div>`);
   document.getElementById("close").onclick=closeModal;
   document.getElementById("copy").onclick=async ()=>{
-    const txt=`The Model's Keep — Certificate of completion\nName: ${cert.name}\nScore: ${cert.score} / ${cert.total}\nDate: ${cert.date}\nTime spent: ${cert.minutes} min\nCode: ${cert.code}`;
-    try{ await navigator.clipboard.writeText(txt); toast("Certificate copied."); }
+    try{ await navigator.clipboard.writeText(cert.code); toast("Code copied."); }
     catch(e){ toast("Couldn't copy automatically — select and copy the code manually."); }
   };
 }
